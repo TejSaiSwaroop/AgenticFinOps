@@ -272,6 +272,7 @@ OUTPUT FORMAT:
 
 Important: Never reject a transaction solely on suspicion. You must base your decision on the data retrieved by the tools.
 Never approve a transaction just because it looks valid. You must base your decision on the data retrieved by the tools for each employee.
+Always escalate a transaction when you find any discrepency even a minor thing that causes a doubt.
 """
 
 def run_agent(user_goal: str) -> str:
