@@ -4,4 +4,16 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "alembic>=1.18.4",
+    "datetime>=6.0",
+    "gradio>=6.15.2",
+    "numpy>=2.4.6",
+    "openai>=2.38.0",
+    "openai-agents>=0.17.4",
+    "pandas>=3.0.3",
+    "pypdf>=6.12.2",
+    "python-dotenv>=1.2.2",
+    "requests>=2.34.2",
+    "sqlalchemy>=2.0.50",
+]
