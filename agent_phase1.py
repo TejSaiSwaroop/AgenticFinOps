@@ -356,9 +356,8 @@ For every flagged transaction, follow this sequence:
    The tool call sends the alert; the FINAL_ANSWER documents the outcome.
 
 ESCALATION RULES:
-- ALWAYS escalate if the transaction exceeds the employee max_amount.
 - ALWAYS escalate if the employee's risk tier is "high" and the merchant is new.
-- always ecalate if the transaction amount overage is less than 4% of the category expence policy limt.
+- always ecalate if the transaction amount overage is less than 4% of the expence policy limit for the category.
 - ALWAYS escalate if historical patterns show a sudden, unexplained spike.
 - If you escalate, include all evidence so the manager can decide immediately.
 
@@ -469,15 +468,15 @@ def ensure_transaction_saved(txn_id, emp_id, amount, category, date=None):
         session.close()
 
 
-transaction_id = "T569"
-amount = "154"
-category = "Meals" 
-employee_id = "E135"
+transaction_id = "T571"
+amount = "160"
+category = "Office Supplies"
+employee_id = "E456"
 
 # inserting the transaction in the transaction table to ensure that it exists in transactions
 ensure_transaction_saved(transaction_id, employee_id, amount, category)
 
-goal = f"Investigate transaction {transaction_id}: of amount -{amount}$ for category-{category} of employee with employee_id-{employee_id}"
+goal = f"Investigate transaction {transaction_id} of amount: {amount}$ for category: {category} of employee with employee_id: {employee_id}"
 
 final_decision = run_agent(goal)
 
