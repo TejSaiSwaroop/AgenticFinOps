@@ -9,11 +9,6 @@ import json
 import requests
 from database.common import run_sql_query
 
-transaction_id = "T123"
-amount = "158"
-category = "Office Supplies" 
-employee_id = "E456"
-
 load_dotenv()
 
 deepseek_base_url = "https://api.deepseek.com/v1"
@@ -26,7 +21,7 @@ telegram_chatid = os.getenv("TELEGRAM_CHATID")
 # deeepseek model
 deepseek_client = OpenAI(base_url=deepseek_base_url, api_key=deepseek_api_key)
 
-def get_employee_expense_profile(employee_id: str):
+def get_employee_profile(employee_id: str):
     """Return employee profile as a JSON string for the LLM's observation."""
     session = SessionLocal()
     try:
@@ -48,7 +43,7 @@ def get_employee_expense_profile(employee_id: str):
     finally:
         session.close()
 
-def get_expense_policy(category: str):
+def get_expense_policy_profile(category: str):
     session = SessionLocal()
     try:
         expence_policy = session.query(ExpensePolicy).filter(ExpensePolicy.category == category).first()
@@ -175,14 +170,14 @@ def search_past_investigations(query: str, max_results: int = 3):
     if not top:
         return json.dumps({"message": "No similar past cases found."})
     
-    return json.dumps(top, default=str)  # default=str handles datetime serialization
+    return json.dumps(top, default=str)  # default=str to handle datetime serialization
 
 
 def save_investigation(transaction_id, employee_id, category, amount, decision, reasoning, evidence_summary):
     session = SessionLocal()
     try:
         investigation = Investigation(
-            id=transaction_id,
+            transaction_id=transaction_id,
             employee_id=employee_id,
             category=category,
             amount=amount,
@@ -192,16 +187,16 @@ def save_investigation(transaction_id, employee_id, category, amount, decision, 
         )
         session.add(investigation)
         session.commit()
-        
+        return f"Transaction status: Decision is {decision} and status saved in Investigations"
+
     except Exception as e:
         print(f"Failed to save investigation: {e}")
         return f"Failed to save investigation: {e}"
     finally:
-        session.close()
-    return f"Transaction status: {decision} and Status saved"    
+        session.close()   
 
-get_employee_expense_profile_json = {
-    "name": "get_employee_expense_profile",
+get_employee_profile_json = {
+    "name": "get_employee_profile",
     "description": "extracts the employee profile details from the sql table",
     "parameters": {
         "type": "object",
@@ -300,15 +295,37 @@ search_past_investigations_json = {
     }
 }
 
-tools = [{"type": "function", "function": get_employee_expense_profile_json},{"type": "function", "function": get_expense_policy_profile_json}
-        ,{"type": "function", "function": get_employee_transaction_history_json},{"type": "function", "function": send_telegram_escalation_json}, {"type": "function", "function": search_past_investigations_json}]
+submit_final_decision_json = {
+    "name": "submit_final_decision",
+    "description": "Submit the final investigation decision. Must be called exactly once at the end of every investigation.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": ["APPROVED", "REJECTED", "ESCALATED"],
+                "description": "The final decision for the transaction."
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "Concise summary of the evidence and reasoning behind the decision."
+            }
+        },
+        "required": ["decision", "reasoning"],
+        "additionalProperties": False
+    }
+}
+
+tools = [{"type": "function", "function": get_employee_profile_json},{"type": "function", "function": get_expense_policy_profile_json}
+        ,{"type": "function", "function": get_employee_transaction_history_json},{"type": "function", "function": send_telegram_escalation_json}, 
+        {"type": "function", "function": search_past_investigations_json}, {"type": "function", "function": submit_final_decision_json}]
 
 system_prompt = """You are an expense compliance agent at a financial firm who works on behalf of the finance team.
 You investigate flagged transactions to determine if they should be approved, rejected or escalated to a human reviewer by analysing them to detect fraud, policy violations and unusual spending patterns.
 You are the best in the world in identifying fraud transactions then approving or rejecting transactions based on the data retrieved by the tools.
 
 You have access to the following tools:
-- get_employee_expense_profile(employee_id: str): Returns the employee's policy limit, risk tier, and manager's Slack ID as a JSON object.
+- get_employee_profile(employee_id: str): Returns the employee's policy limit, risk tier, and manager's Slack ID as a JSON object.
 - get_expense_policy(category: str): Returns the company's expense policy for the given category, including max_amount, whether a receipt is required, and any additional notes.
 - get_employee_transaction_history(emp_id: str, days: int):  Returns recent transactions with statistics for pattern analysis.
 - send_telegram_escalation(employee_id, transaction_details, escalation_reason, evidence_summary, employee_slack_id): Sends an instant Telegram alert to the manager with full investigation details. 
@@ -316,6 +333,7 @@ You have access to the following tools:
 - search_past_investigations(query: str, max_results: int = 3): returns the past transaction details with the decision taken 
 - search_past_investigations(query: str, max_results: int): Searches past completed investigations for cases similar to the current transaction. Returns a JSON list of the most relevant past cases. 
   Use this when you want to check how similar situations have been handled before to ensure consistent decisions.
+- save_investigation(transaction_id, employee_id, category, amount, decision, reasoning, evidence_summary): saves the investigation details in the investigations for future reference.
 
 Decisions:
 - APPROVED: The transaction is normal and within the employee's limits.
@@ -338,30 +356,14 @@ For every flagged transaction, follow this sequence:
    The tool call sends the alert; the FINAL_ANSWER documents the outcome.
 
 ESCALATION RULES:
-- ALWAYS escalate if the transaction exceeds the policy limit by more than 4%.
+- ALWAYS escalate if the transaction exceeds the employee max_amount.
 - ALWAYS escalate if the employee's risk tier is "high" and the merchant is new.
+- always ecalate if the transaction amount overage is less than 4% of the category expence policy limt.
 - ALWAYS escalate if historical patterns show a sudden, unexplained spike.
 - If you escalate, include all evidence so the manager can decide immediately.
 
-FINAL OUTPUT FORMAT
-When you have reached a final decision (ex: if escalating have already called the send_telegram_escalation tool). you must output exactly:
-
-FINAL_ANSWER: APPROVED
-Reasoning: <your concise reasoning, citing specific data from tools>
-
-or
-
-FINAL_ANSWER: REJECTED
-Reasoning: <your concise reasoning>
-
-or
-
-FINAL_ANSWER: ESCALATED
-Reasoning: <your concise reasoning>
-
-The decision word (APPROVED/REJECTED/ESCALATED) must be the first word after "FINAL_ANSWER: ". 
-The reasoning must be on the next line(s) and should summarise the evidence you used.
-This format is mandatory. It allows automatic record keeping.
+FINAL DECISION: When you have reached a decision, you MUST call the function submit_final_decision with your decision and reasoning. Do not output text. call the tool. 
+This is how the system records your investigation. If your decision is ESCALATE, you must have already called send_telegram_escalation before calling submit_final_decision.
 
 Important: Never reject a transaction solely on suspicion. You must base your decision on the data retrieved by the tools.
 Never approve a transaction just because it looks valid. You must base your decision on the data retrieved by the tools for each employee.
@@ -375,24 +377,56 @@ def run_agent(user_goal: str) -> str:
         {"role": "user", "content": user_goal}
     ]
     max_turns = 10
+    call_counter = {}
 
     for _ in range(max_turns):
         print(_)
         response = deepseek_client.chat.completions.create(model="deepseek-v4-pro", messages=messages, tools=tools)
 
         msg = response.choices[0].message
-        finish_reason = response.choices[0].finish_reason
-
+        finish_reason = response.choices[0].finish_reason 
+        warning = ""
         # If the LLM wants to call a tool
         if finish_reason == "tool_calls":
             messages.append(msg.model_dump())
             tool_calls = msg.tool_calls
+            
             for tool_call in tool_calls:
                 tool_name = tool_call.function.name
+                print( tool_name)
                 tool_args = json.loads(tool_call.function.arguments)
 
+                if tool_name == "submit_final_decision":
+                    decision = tool_args["decision"]
+                    reasoning = tool_args["reasoning"]
+                    # Collect evidence from previous tool messages
+                    evidence_summary = ".\n".join(msg["content"] for msg in messages if msg["role"] == "tool")
+
+                    save_investigation(transaction_id, employee_id, category, amount, decision, reasoning, evidence_summary)
+
+                    return f"Investigation completed: {decision}"
+
+                call_signature = (tool_name, json.dumps(tool_args, sort_keys=True))
+                call_counter[call_signature] = call_counter.get(call_signature, 0) + 1
+
+                if call_counter[call_signature] == 2:
+                    # Warning: same call repeated twice
+                    warning = f"[WARNING] Tool - {tool_name} called a second time with identical args."
+                    print(f"[WARNING] Tool - {tool_name} called a second time with identical args.")
+                elif call_counter[call_signature] >= 3:
+                    # Stuck loop detected – escalate immediately
+                    reason = f"Agent loop detected: tool '{tool_name}' called {call_counter[call_signature]} times with same arguments."
+                    print(reason)
+                    # Build escalation details with what we know
+                    escalation_msg = send_telegram_escalation(employee_id, f"Transaction {transaction_id}: {amount}$ {category}", reason,
+                        "Investigation aborted automatically to prevent infinite loop.", "manager_not_set")
+                    # Save the escalation as the final decision
+                    save_investigation(transaction_id, employee_id, category, amount, "ESCALATED", reason, escalation_msg)
+                    return reason
+
                 tool = globals().get(tool_name)
-                result = tool(**tool_args) if tool else json.dumps({"error": "tool not found"})
+                result = tool(**tool_args) if tool else json.dumps({"error": f"tool - '{tool_name}' not found"})
+                result = result + warning
             # OBSERVE: Add the tool result to memory as a "tool" role message
                 messages.append({
                     "role": "tool",
@@ -403,26 +437,47 @@ def run_agent(user_goal: str) -> str:
             print(finish_reason)
             final_text = msg.content
             if final_text:
-                decision = final_text.split()[1]
-                reason = final_text
-                evidence_parts = []
-                for msg in messages:
-                    if msg["role"] == "tool":
-                        evidence_parts.append(msg["content"])
-                evidence_summary = "\n--- ---\n".join(evidence_parts)
-                print(evidence_summary) 
-                status = save_investigation(transaction_id, employee_id, category, amount, decision, reason, evidence_summary)
-                return status
+                return final_text
             else:
                 return "Agent ended with no output."
 
     return "Agent reached max turns without finalizing."
 
 
-# goal = "Investigate transaction T0563: $54 for Meals, employee E789"
-goal = f"Investigate transaction {transaction_id}: {amount}$ at {category} for employee {employee_id}"
-# goal = "Investigate transaction T200: $500 at Office Supplies, employee E456"
-# goal = "Investigate transaction T300: $400 at Electronics Store, employee E789"
+def ensure_transaction_saved(txn_id, emp_id, amount, category, date=None):
+    session = SessionLocal()
+    try:
+        txn = session.query(Transaction).filter(Transaction.id == txn_id).first()
+        if not txn:
+            new_txn = Transaction(
+                id=txn_id,
+                employee_id=emp_id,
+                category=category,
+                amount=amount,
+                date= date if date else datetime.today(),
+                status='flagged'
+            )
+            session.add(new_txn)
+            session.commit()
+            print(f"Transaction {txn_id} recorded.")
+        else:
+            print(f"Transaction {txn_id} already exists.")
+    except Exception as e:
+        session.rollback()
+        raise e
+    finally:
+        session.close()
+
+
+transaction_id = "T569"
+amount = "154"
+category = "Meals" 
+employee_id = "E135"
+
+# inserting the transaction in the transaction table to ensure that it exists in transactions
+ensure_transaction_saved(transaction_id, employee_id, amount, category)
+
+goal = f"Investigate transaction {transaction_id}: of amount -{amount}$ for category-{category} of employee with employee_id-{employee_id}"
 
 final_decision = run_agent(goal)
 

@@ -11,7 +11,8 @@ def seed_data():
             Employee(id="E456", name="Alice", policy_limit=200.0, risk_tier="low", manager_slack_id="U123"),
             Employee(id="E789", name="Bob", policy_limit=500.0, risk_tier="medium", manager_slack_id="U456"),
             Employee(id="E135", name="raj", policy_limit=120.0, risk_tier="medium", manager_slack_id="U234"),
-            # ... add other employees (including new columns if any)
+            Employee(id="E365", name="Ravi", policy_limit=150.0, risk_tier="High", manager_slack_id="U453")
+            # ... add new employees 
         ])
 
     if session.query(ExpensePolicy).count() == 0:

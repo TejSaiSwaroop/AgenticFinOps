@@ -1,5 +1,5 @@
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey, Index
+from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey, Index, Integer
 from datetime import datetime
 from sqlalchemy.orm import relationship
 
@@ -39,7 +39,8 @@ class Transaction(Base):
 
 class Investigation(Base):
     __tablename__ = "investigations"
-    id = Column(String, primary_key=True)  # transaction_id
+    id = Column(Integer, primary_key=True, autoincrement= True)  # transaction_id
+    transaction_id  = Column(String, ForeignKey("transactions.id", name = "fk_investigation_transaction"), nullable = False)
     employee_id = Column(String, ForeignKey("employees.id", name="fk_investigations_employee"), nullable=False)
     category = Column(String, ForeignKey("expense_policies.category", name = "fk_investigations_category"))
     amount = Column(Float)
