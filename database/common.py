@@ -16,3 +16,10 @@ def run_sql_query(query: str):
 
     except Exception as e:
         return json.dumps(str(e))
+
+
+def run_modify_sql(query: str):
+    """Executes a raw SQL query and prints results."""
+    with engine.begin() as conn:
+        result = conn.execute(text(query))
+    conn.close()

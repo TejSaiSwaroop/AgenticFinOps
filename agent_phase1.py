@@ -3,11 +3,14 @@ from time import timezone
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
+
+from sqlalchemy.util import NoneType
 from database.db import SessionLocal
 from database.models import Employee, ExpensePolicy, Transaction, Investigation
 import json
 import requests
-from database.common import run_sql_query
+from database.common import run_sql_query, run_modify_sql
+
 
 load_dotenv()
 
@@ -102,7 +105,10 @@ def get_employee_transaction_history(emp_id: str, days: int):
             "flagged_transactions": flagged_count,
             "recent_history": history
         }
-
+        # updates required
+        # """
+        # to update the function result to include the current case details.
+        # """
         return json.dumps(result)
     
     except Exception as e:
@@ -157,8 +163,8 @@ def search_past_investigations(query: str, max_results: int = 3):
     keywords = query.lower().split()
     scored = []
     for row in data:
-        text_to_search = f"{row.get('category','')} {row.get('reasoning','')}".lower()
-        print(text_to_search)
+        text_to_search = f"{row.get('category','')} -----> {row.get('reasoning','')}".lower()
+        print("\n----------------------text-----------------------\n",text_to_search,"\n----------------------text-----------------------\n")
         score = sum(1 for kw in keywords if kw in text_to_search)
         if score > 0:
             scored.append((score, row))
@@ -166,6 +172,10 @@ def search_past_investigations(query: str, max_results: int = 3):
     # Sort by score descending, take top max_results
     scored.sort(key=lambda x: x[0], reverse=True)
     top = [row for score, row in scored[:max_results]]
+
+    print("---------------------------------------")
+    print(top)
+    print("---------------------------------------\n")
     
     if not top:
         return json.dumps({"message": "No similar past cases found."})
@@ -344,20 +354,21 @@ INVESTIGATION PROTOCOL:
 For every flagged transaction, follow this sequence:
 1. ALWAYS fetch the employee profile first to understand their limits and risk level.
 2. ALWAYS check the category policy to know the rules.
-3. If the transaction seems unusual or you are uncertain, fetch the employees transaction history to:
+3. Always base the decisions based on status from stransaction table history because even the escalated transactions from investigation table are updated by the employee manager. 
+4. If the transaction seems unusual or you are uncertain, fetch the employees transaction history to:
    - Compare against typical spending in this category
    - Look for sudden spikes or frequency changes
-   - Identify if similar transactions were previously flagged
+   - Identify if similar transactions were previously escalated or rejected.
    - Check if the merchant is new or unusual
    - After reviewing the history, if you still need more context or want to ensure consistency, optionally call search_past_investigations with a query summarising the current situation 
     (e.g., “office supplies over policy limit new merchant”). Use the results to inform your decision, if a nearly identical case was approved/rejected/escalated before, 
     that should heavily influence your choice.
-4. If your decision is ESCALATE, you MUST call send_telegram_escalation BEFORE giving your FINAL_ANSWER.
+5. If your decision is ESCALATE, you MUST call send_telegram_escalation BEFORE giving your FINAL_ANSWER.
    The tool call sends the alert; the FINAL_ANSWER documents the outcome.
 
 ESCALATION RULES:
 - ALWAYS escalate if the employee's risk tier is "high" and the merchant is new.
-- always ecalate if the transaction amount overage is less than 4% of the expence policy limit for the category.
+- Always ecalate if the transaction amount overage is less than 4% of the expence policy limit for the category else if the overage is more than 4% then Reject the transaction.
 - ALWAYS escalate if historical patterns show a sudden, unexplained spike.
 - If you escalate, include all evidence so the manager can decide immediately.
 
@@ -398,12 +409,16 @@ def run_agent(user_goal: str) -> str:
                 if tool_name == "submit_final_decision":
                     decision = tool_args["decision"]
                     reasoning = tool_args["reasoning"]
+                    print("\n----------------------")
+                    print(reasoning)
+                    print("----------------------\n")
+
                     # Collect evidence from previous tool messages
                     evidence_summary = ".\n".join(msg["content"] for msg in messages if msg["role"] == "tool")
 
                     save_investigation(transaction_id, employee_id, category, amount, decision, reasoning, evidence_summary)
 
-                    return f"Investigation completed: {decision}"
+                    return decision
 
                 call_signature = (tool_name, json.dumps(tool_args, sort_keys=True))
                 call_counter[call_signature] = call_counter.get(call_signature, 0) + 1
@@ -433,9 +448,9 @@ def run_agent(user_goal: str) -> str:
                     "content": result})
 
         else:
-            print(finish_reason)
             final_text = msg.content
             if final_text:
+                print(final_text)
                 return final_text
             else:
                 return "Agent ended with no output."
@@ -443,7 +458,7 @@ def run_agent(user_goal: str) -> str:
     return "Agent reached max turns without finalizing."
 
 
-def ensure_transaction_saved(txn_id, emp_id, amount, category, date=None):
+def ensure_transaction_saved(txn_id, emp_id, amount, category, merchant=None, date=None):
     session = SessionLocal()
     try:
         txn = session.query(Transaction).filter(Transaction.id == txn_id).first()
@@ -454,7 +469,8 @@ def ensure_transaction_saved(txn_id, emp_id, amount, category, date=None):
                 category=category,
                 amount=amount,
                 date= date if date else datetime.today(),
-                status='flagged'
+                merchant=merchant,
+                status='flagged'                
             )
             session.add(new_txn)
             session.commit()
@@ -468,16 +484,21 @@ def ensure_transaction_saved(txn_id, emp_id, amount, category, date=None):
         session.close()
 
 
-transaction_id = "T571"
-amount = "160"
-category = "Office Supplies"
+transaction_id = "T577"
+amount = "53"
+category = "Meals"
 employee_id = "E456"
+merchant= "Steakhouse"
 
 # inserting the transaction in the transaction table to ensure that it exists in transactions
-ensure_transaction_saved(transaction_id, employee_id, amount, category)
+ensure_transaction_saved(transaction_id, employee_id, amount, category, merchant)
 
-goal = f"Investigate transaction {transaction_id} of amount: {amount}$ for category: {category} of employee with employee_id: {employee_id}"
+goal = f"Investigate transaction {transaction_id} of amount: {amount}$ in category: {category} with merchant - {merchant} of employee with employee_id: {employee_id}"
 
 final_decision = run_agent(goal)
+
+if final_decision.lower() in ['approved', 'rejected', 'escalated']:
+    status_update_query = f"UPDATE transactions SET status = '{final_decision}' WHERE id = '{transaction_id}';"
+    run_modify_sql(status_update_query)
 
 print("\n", final_decision)

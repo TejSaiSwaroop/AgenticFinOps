@@ -10,6 +10,7 @@ class Employee(Base):
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
     policy_limit = Column(Float, nullable=False)
+    department = Column(String, nullable=False)
     risk_tier = Column(String, nullable=False)
     manager_slack_id = Column(String)
 
