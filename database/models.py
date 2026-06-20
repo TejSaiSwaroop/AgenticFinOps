@@ -32,9 +32,11 @@ class Transaction(Base):
     date = Column(DateTime, default=datetime.now)
     category = Column(String, ForeignKey("expense_policies.category", name = "fk_transaction_category"), nullable=False)
     amount = Column(Float, nullable=False)
-    merchant = Column(String)
-    status = Column(String, default="completed")  # completed, flagged, rejected
+    merchant = Column(String, nullable=False)
     receipt_provided = Column(Boolean, default=False)
+    transaction_status = Column(String, default = "flagged", nullable=False)
+    agent_decision = Column(String, default="pending", nullable=False)
+    HIL_status = Column(String, nullable=True)
 
     employees = relationship("Employee", back_populates="transactions")
 

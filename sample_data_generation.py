@@ -53,10 +53,10 @@ for cat in categories:
         max_amt = 50.0
         receipt = True
     elif cat == "Office Supplies":
-        max_amt = 1500.0
+        max_amt = 650.0
         receipt = False
     elif cat == "Marketing":
-        max_amt = 800.0
+        max_amt = 600.0
         receipt = True
     else:
         max_amt = 200.0
@@ -79,20 +79,20 @@ merchants = {
 }
 
 start_date = datetime.now() - timedelta(days=457)  # 15 months ago
-flag_ids = []
+cancelled_ids = []
 
 for i in range(1200):
     emp = random.choice(employees)
     cat = random.choice(categories)
     # Realistic amount distribution
     if cat == "Travel":
-        amt = round(random.uniform(200, 1500), 2)
+        amt = round(random.uniform(200, 1600), 2)
     elif cat == "Meals":
         amt = round(random.uniform(8, 80), 2)
     elif cat == "Office Supplies":
-        amt = round(random.uniform(10, 200), 2)
+        amt = round(random.uniform(10, 702), 2)
     elif cat == "Software":
-        amt = round(random.uniform(20, 300), 2)
+        amt = round(random.uniform(20, 360), 2)
     elif cat == "Hardware":
         amt = round(random.uniform(50, 600), 2)
     elif cat == "Marketing":
@@ -107,14 +107,14 @@ for i in range(1200):
     merchant = random.choice(merchants[cat])
     
     # Flagging logic (approx 5-8% flagged)
-    is_flagged = False
+    is_cancelled = False
     pol_max = policies[categories.index(cat)].max_amount
-    if emp.risk_tier == "high" and random.random() < 0.07:
-        is_flagged = True
-    elif amt > pol_max * 1.7:
-        is_flagged = True
+    if emp.risk_tier == "high" and random.random() < 0.05:
+        is_cancelled = True
+    elif amt > pol_max * 1.2:
+        is_cancelled = True
     elif random.random() < 0.02:
-        is_flagged = True
+        is_cancelled = True
     
     txn = Transaction(
         id=f"T{i+1000:04d}",
@@ -123,15 +123,15 @@ for i in range(1200):
         category=cat,
         amount=amt,
         merchant=merchant,
-        status="cancelled" if is_flagged else "completed",
+        status="cancelled" if is_cancelled else "completed",
         receipt_provided=random.choice([True, False])
     )
     session.add(txn)
-    if is_flagged:
-        flag_ids.append(txn.id)
+    if is_cancelled:
+        cancelled_ids.append(txn.id)
 
 session.commit()
 session.close()
 
 print(f"✅ Generated {len(employees)} employees, {len(categories)} policies, 1200 transactions.")
-print(f"🚩 Flagged transactions: {len(flag_ids)}")
+print(f"🚩 cancelled transactions: {len(cancelled_ids)}")

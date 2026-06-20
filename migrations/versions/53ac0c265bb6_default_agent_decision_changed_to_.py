@@ -1,8 +1,8 @@
-"""data changes made as required
+"""default agent decision changed to 'pending'
 
-Revision ID: 57ac5fda052d
-Revises: 0c32542154c9
-Create Date: 2026-06-18 12:01:49.620099
+Revision ID: 53ac0c265bb6
+Revises: 73c9b7917da4
+Create Date: 2026-06-20 01:39:34.881787
 
 """
 from typing import Sequence, Union
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '57ac5fda052d'
-down_revision: Union[str, Sequence[str], None] = '0c32542154c9'
+revision: str = '53ac0c265bb6'
+down_revision: Union[str, Sequence[str], None] = '73c9b7917da4'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
