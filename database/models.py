@@ -47,7 +47,7 @@ class Investigation(Base):
     employee_id = Column(String, ForeignKey("employees.id", name="fk_investigations_employee"), nullable=False)
     category = Column(String, ForeignKey("expense_policies.category", name = "fk_investigations_category"))
     amount = Column(Float)
-    decision = Column(String)  # APPROVED, REJECTED, ESCALATED
+    agent_decision = Column(String)  # APPROVED, REJECTED, ESCALATED
     reasoning = Column(String)
     evidence_summary = Column(String)
     created_at = Column(DateTime, default=datetime.now)

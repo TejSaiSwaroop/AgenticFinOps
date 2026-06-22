@@ -4,7 +4,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os
 
-from sqlalchemy.util import NoneType
+from sqlalchemy import update
 from database.db import SessionLocal
 from database.models import Employee, ExpensePolicy, Transaction, Investigation
 import json
@@ -23,6 +23,12 @@ telegram_chatid = os.getenv("TELEGRAM_CHATID")
 
 # deeepseek model
 deepseek_client = OpenAI(base_url=deepseek_base_url, api_key=deepseek_api_key)
+
+status_map = {
+    'approved': 'completed',
+    'rejected': 'cancelled',
+    'escalated': 'pending_review'
+}
 
 def get_employee_profile(employee_id: str):
     """Return employee profile as a JSON string for the LLM's observation."""
@@ -82,14 +88,16 @@ def get_employee_transaction_history(emp_id: str, days: int):
                 "category": t.category,
                 "amount": t.amount,
                 "merchant": t.merchant,
-                "status": t.status
+                "transaction_status": t.transaction_status,
+                "agent_decision": t.agent_decision,
+                "HIL_status":t.HIL_status
             })
 
         # transactions summary
         total_spent = sum(t.amount for t in transactions)
         avg_transaction = total_spent/len(transactions)
         categories = list(set((t.category for t in transactions)))
-        flagged_count = sum(1 for t in transactions if t.status == "flagged")
+        flagged_count = sum(1 for t in transactions if t.transaction_status == "flagged")
         max_transaction_amount = max(t.amount for t in transactions)
         min_transaction_amount = min(t.amount for t in transactions)
 
@@ -105,10 +113,6 @@ def get_employee_transaction_history(emp_id: str, days: int):
             "flagged_transactions": flagged_count,
             "recent_history": history
         }
-        # updates required
-        # """
-        # to update the function result to include the current case details.
-        # """
         return json.dumps(result)
     
     except Exception as e:
@@ -153,7 +157,7 @@ def send_telegram_escalation(employee_id, transaction_details, escalation_reason
         return json.dumps({"status": "Error", "message": str(e)})
 
 def search_past_investigations(query: str, max_results: int = 3):
-    sql = "SELECT id, employee_id, category, amount, decision, reasoning, created_at FROM investigations"
+    sql = "SELECT id, employee_id, category, amount, agent_decision, reasoning, created_at FROM investigations"
     data = run_sql_query(sql)
     
     if isinstance(data, dict) and "error" in data:
@@ -191,13 +195,21 @@ def save_investigation(transaction_id, employee_id, category, amount, decision, 
             employee_id=employee_id,
             category=category,
             amount=amount,
-            decision=decision,
+            agent_decision=decision,
             reasoning=reasoning,
             evidence_summary=evidence_summary
         )
         session.add(investigation)
+        if decision.lower() in ['approved', 'rejected', 'escalated']:
+            new_status = status_map.get(decision.lower())
+            if new_status:
+                update_transaction = (update(Transaction)
+                    .where(Transaction.id == transaction_id)
+                    .values(agent_decision=decision.lower(),
+                            transaction_status=new_status))
+            session.execute(update_transaction)
         session.commit()
-        return f"Transaction status: Decision is {decision} and status saved in Investigations"
+        return f"Transaction status updated and Decision is {decision} and details saved in Investigations"
 
     except Exception as e:
         print(f"Failed to save investigation: {e}")
@@ -307,14 +319,14 @@ search_past_investigations_json = {
 
 submit_final_decision_json = {
     "name": "submit_final_decision",
-    "description": "Submit the final investigation decision. Must be called exactly once at the end of every investigation.",
+    "description": "Submit the agent's final investigation decision. Must be called exactly once at the end of every investigation.",
     "parameters": {
         "type": "object",
         "properties": {
             "decision": {
                 "type": "string",
                 "enum": ["APPROVED", "REJECTED", "ESCALATED"],
-                "description": "The final decision for the transaction."
+                "description": "The agent's decision for the transaction."
             },
             "reasoning": {
                 "type": "string",
@@ -337,13 +349,14 @@ You are the best in the world in identifying fraud transactions then approving o
 You have access to the following tools:
 - get_employee_profile(employee_id: str): Returns the employee's policy limit, risk tier, and manager's Slack ID as a JSON object.
 - get_expense_policy(category: str): Returns the company's expense policy for the given category, including max_amount, whether a receipt is required, and any additional notes.
-- get_employee_transaction_history(emp_id: str, days: int):  Returns recent transactions with statistics for pattern analysis.
+- get_employee_transaction_history(emp_id: str, days: int): Returns recent transactions with statistics for pattern analysis. Each transaction record includes:
+    - transaction_status: the current lifecycle state (completed, cancelled, flagged, pending_review, failed).
+    - agent_decision: the final decision made by the compliance system (approved or rejected).
+    - HIL_status: if the transaction was escalated, this shows the human reviewer's final decision (approved or rejected). NULL means no human was involved.
 - send_telegram_escalation(employee_id, transaction_details, escalation_reason, evidence_summary, employee_slack_id): Sends an instant Telegram alert to the manager with full investigation details. 
   Use this tool IMMEDIATELY after deciding to ESCALATE — it delivers the evidence to the human reviewer.
-- search_past_investigations(query: str, max_results: int = 3): returns the past transaction details with the decision taken 
 - search_past_investigations(query: str, max_results: int): Searches past completed investigations for cases similar to the current transaction. Returns a JSON list of the most relevant past cases. 
   Use this when you want to check how similar situations have been handled before to ensure consistent decisions.
-- save_investigation(transaction_id, employee_id, category, amount, decision, reasoning, evidence_summary): saves the investigation details in the investigations for future reference.
 
 Decisions:
 - APPROVED: The transaction is normal and within the employee's limits.
@@ -354,12 +367,13 @@ INVESTIGATION PROTOCOL:
 For every flagged transaction, follow this sequence:
 1. ALWAYS fetch the employee profile first to understand their limits and risk level.
 2. ALWAYS check the category policy to know the rules.
-3. Always base the decisions based on status from stransaction table history because even the escalated transactions from investigation table are updated by the employee manager. 
-4. If the transaction seems unusual or you are uncertain, fetch the employees transaction history to:
+3. Always base your decisions on the data from transaction history. The agent_decision and HIL_status fields show you how past transactions were resolved — use these to maintain consistency. Even escalated transactions are updated by the employee's manager, so their final outcome is visible.
+4. If the transaction seems unusual or you are uncertain, fetch the employee's transaction history to:
    - Compare against typical spending in this category
    - Look for sudden spikes or frequency changes
-   - Identify if similar transactions were previously escalated or rejected.
+   - Identify if similar transactions were previously escalated or rejected (check agent_decision field)
    - Check if the merchant is new or unusual
+   - Review past HIL_status to see how humans resolved similar escalations
    - After reviewing the history, if you still need more context or want to ensure consistency, optionally call search_past_investigations with a query summarising the current situation 
     (e.g., “office supplies over policy limit new merchant”). Use the results to inform your decision, if a nearly identical case was approved/rejected/escalated before, 
     that should heavily influence your choice.
@@ -368,23 +382,42 @@ For every flagged transaction, follow this sequence:
 
 ESCALATION RULES:
 - ALWAYS escalate if the employee's risk tier is "high" and the merchant is new.
-- Always ecalate if the transaction amount overage is less than 4% of the expence policy limit for the category else if the overage is more than 4% then Reject the transaction.
+- Always escalate if the transaction amount overage is less than 4% of the expense policy limit for the category. If the overage is more than 4%, then REJECT the transaction.
 - ALWAYS escalate if historical patterns show a sudden, unexplained spike.
 - If you escalate, include all evidence so the manager can decide immediately.
 
-FINAL DECISION: When you have reached a decision, you MUST call the function submit_final_decision with your decision and reasoning. Do not output text. call the tool. 
+MANDATORY THINKING STEP:
+Before calling any tool (except submit_final_decision), you MUST FIRST output a single line that starts with [THINK]: 
+followed by your reasoning about what you currently know, what you need to find out, and why the next tool is the right one.
+
+After you output [THINK]:, do NOT call a tool in the same response. The system will record your thought and then give you another turn. On the NEXT turn, call the tool.
+
+Example:
+Turn 1:
+[THINK]: I need the employee profile to check limits and risk tier.
+
+Turn 2 (system gives you another chance):
+Tool call: get_employee_profile(employee_id="E103")
+
+Never output [THINK] before submit_final_decision. For the final decision, call submit_final_decision directly.
+
+FINAL DECISION: When you have reached a decision, you MUST call the function (tool) "submit_final_decision" with your decision and reasoning. Do not output text. call the tool. 
 This is how the system records your investigation. If your decision is ESCALATE, you must have already called send_telegram_escalation before calling submit_final_decision.
+
+FINAL_ANSWER: APPROVED|REJECTED|ESCALATED
+Your decision will be automatically recorded in the transaction as agent_decision, and the transaction_status will be updated accordingly.
 
 Important: Never reject a transaction solely on suspicion. You must base your decision on the data retrieved by the tools.
 Never approve a transaction just because it looks valid. You must base your decision on the data retrieved by the tools for each employee.
-Always escalate a transaction when you find any discrepency even a minor thing that causes a doubt.
+Always escalate a transaction when you find any discrepancy, even a minor thing that causes a doubt.
 """
 
 def run_agent(user_goal: str) -> str:
     print(user_goal)
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_goal}
+        {"role": "user", "content": user_goal},
+        {"role": "assistant", "content": "[THINK]: I will now begin the investigation by gathering the necessary data."}
     ]
     max_turns = 10
     call_counter = {}
@@ -435,25 +468,25 @@ def run_agent(user_goal: str) -> str:
                     escalation_msg = send_telegram_escalation(employee_id, f"Transaction {transaction_id}: {amount}$ {category}", reason,
                         "Investigation aborted automatically to prevent infinite loop.", "manager_not_set")
                     # Save the escalation as the final decision
-                    save_investigation(transaction_id, employee_id, category, amount, "ESCALATED", reason, escalation_msg)
+                    save_investigation(transaction_id, employee_id, category, amount, "escalated", reason, escalation_msg)
                     return reason
 
                 tool = globals().get(tool_name)
                 result = tool(**tool_args) if tool else json.dumps({"error": f"tool - '{tool_name}' not found"})
-                result = result + warning
             # OBSERVE: Add the tool result to memory as a "tool" role message
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result})
+                messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+                if warning:
+                    messages.append({"role": "system", "content": warning})
 
         else:
             final_text = msg.content
-            if final_text:
+            if final_text and final_text.startswith("[THINK]:"):
+                # Append the thought to memory, continue loop
+                messages.append({"role": "assistant", "content": final_text})
                 print(final_text)
-                return final_text
+                continue
             else:
-                return "Agent ended with no output."
+                return final_text
 
     return "Agent reached max turns without finalizing."
 
@@ -470,7 +503,7 @@ def ensure_transaction_saved(txn_id, emp_id, amount, category, merchant=None, da
                 amount=amount,
                 date= date if date else datetime.today(),
                 merchant=merchant,
-                status='flagged'                
+                transaction_status='flagged'                
             )
             session.add(new_txn)
             session.commit()
@@ -484,21 +517,17 @@ def ensure_transaction_saved(txn_id, emp_id, amount, category, merchant=None, da
         session.close()
 
 
-transaction_id = "T577"
-amount = "53"
-category = "Meals"
-employee_id = "E456"
-merchant= "Steakhouse"
+transaction_id = "T2206"
+amount = 240.00
+category = "Software"
+employee_id = "E104"
+merchant= "Slack"
 
 # inserting the transaction in the transaction table to ensure that it exists in transactions
 ensure_transaction_saved(transaction_id, employee_id, amount, category, merchant)
 
-goal = f"Investigate transaction {transaction_id} of amount: {amount}$ in category: {category} with merchant - {merchant} of employee with employee_id: {employee_id}"
+goal = f"Investigate transaction {transaction_id} of amount: {str(amount)}$ in category: {category} with merchant - {merchant} of employee with employee_id: {employee_id}"
 
 final_decision = run_agent(goal)
-
-if final_decision.lower() in ['approved', 'rejected', 'escalated']:
-    status_update_query = f"UPDATE transactions SET status = '{final_decision}' WHERE id = '{transaction_id}';"
-    run_modify_sql(status_update_query)
 
 print("\n", final_decision)
