@@ -1,28 +1,11 @@
 from datetime import datetime, timedelta
-from time import timezone
-from openai import OpenAI
-from dotenv import load_dotenv
-import os
-
 from sqlalchemy import update, func
 from database.db import SessionLocal
 from database.models import Employee, ExpensePolicy, Transaction, Investigation
-import json
-import requests
+import json, requests
 from database.common import run_sql_query, run_modify_sql
-
-
-load_dotenv()
-
-deepseek_base_url = "https://api.deepseek.com/v1"
-deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
-
-# for Telegram
-telegram_bot_token = os.getenv("TELEGRAM_TOKEN")
-telegram_chatid = os.getenv("TELEGRAM_CHATID")
-
-# deeepseek model
-deepseek_client = OpenAI(base_url=deepseek_base_url, api_key=deepseek_api_key)
+from config import deepseek_client, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, LLM_MODEL
+from tools.registry import ToolRegistry
 
 status_map = {
     'approved': 'completed',
@@ -139,12 +122,12 @@ def create_escalation_message(employee_id, transaction_details, escalation_reaso
     return message
 
 def send_telegram_escalation(employee_id, transaction_details, escalation_reason, evidence_summary, employee_slack_id):
-    url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     escalation_message = create_escalation_message(employee_id, transaction_details, escalation_reason, evidence_summary, employee_slack_id)
 
     # Using MarkdownV2 or HTML is much more stable for multi-agent variables
-    payload = {"chat_id": telegram_chatid, "text": escalation_message, "parse_mode": "Markdown"}
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": escalation_message, "parse_mode": "Markdown"}
 
     try:
         # Always use json= payload for streaming LLM text to avoid form-encoding corruption
@@ -235,7 +218,18 @@ def save_investigation(transaction_id, employee_id, category, amount, decision, 
         print(f"Failed to save investigation: {e}")
         return f"Failed to save investigation: {e}"
     finally:
-        session.close()   
+        session.close() 
+
+def send_email_escalation(employee_id, transaction_details, escalation_reason, evidence_summary, employee_slack_id):
+    """Simulate sending an escalation email. Returns a JSON status."""
+    # In production, use smtplib or an email service
+    print(f"\n--- EMAIL ESCALATION ---")
+    print(f"To: manager_{employee_slack_id}@company.com")
+    print(f"Subject: Expense Escalation for Employee {employee_id}")
+    print(f"Body: {escalation_reason}\n\n{evidence_summary}")
+    print(f"--- EMAIL SENT (simulated) ---\n")
+    return json.dumps({"status": "success", "platform": "Email"})
+
 
 get_employee_profile_json = {
     "name": "get_employee_profile",
@@ -367,9 +361,26 @@ submit_final_decision_json = {
     }
 }
 
-tools = [{"type": "function", "function": get_employee_profile_json},{"type": "function", "function": get_expense_policy_profile_json}
-        ,{"type": "function", "function": get_employee_transaction_history_json},{"type": "function", "function": send_telegram_escalation_json}, 
-        {"type": "function", "function": search_past_investigations_json}, {"type": "function", "function": submit_final_decision_json}]
+send_email_escalation_json = {
+    "name": "send_email_escalation",
+    "description": "Sends an escalation email to the manager. Use this as a fallback if the Telegram escalation fails.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "employee_id": {"type": "string", "description": "Employee ID who made the transaction."},
+            "transaction_details": {"type": "string", "description": "Summary of the transaction."},
+            "escalation_reason": {"type": "string", "description": "Why it's being escalated."},
+            "evidence_summary": {"type": "string", "description": "Key investigation findings."},
+            "employee_slack_id": {"type": "string", "description": "Manager's contact identifier."}
+        },
+        "required": ["employee_id", "transaction_details", "escalation_reason", "evidence_summary", "employee_slack_id"],
+        "additionalProperties": False
+    }
+}
+
+# tools = [{"type": "function", "function": get_employee_profile_json},{"type": "function", "function": get_expense_policy_profile_json}
+#         ,{"type": "function", "function": get_employee_transaction_history_json},{"type": "function", "function": send_telegram_escalation_json}, 
+#         {"type": "function", "function": search_past_investigations_json}, {"type": "function", "function": submit_final_decision_json}]
 
 THINK_SYSTEM_PROMPT = """You are the THINK phase of an expense compliance agent at a financial firm.
 Your job is to analyse the current flagged transaction and identify what information you still need to make a confident decision.
@@ -410,6 +421,8 @@ You have access to the following tools:
 - send_telegram_escalation(employee_id, transaction_details, escalation_reason, evidence_summary, employee_slack_id): Sends an instant Telegram alert to the manager with full investigation details. Use this tool IMMEDIATELY after deciding to ESCALATE.
 - search_past_investigations(query, max_results, employee_id, category): Searches past completed investigations for cases similar to the current transaction. ALWAYS include the current employee_id and category for precise results. Use this to check how similar situations were handled before.
 - submit_final_decision(decision, reasoning): Submits your final decision. decision must be APPROVED, REJECTED, or ESCALATED. reasoning is a concise summary of your evidence.
+- send_email_escalation(employee_id, transaction_details, escalation_reason, evidence_summary, employee_slack_id): 
+  Sends an escalation via email. Use this if the Telegram escalation tool returns an error.
 
 Decisions:
 - APPROVED: The transaction is normal and within the employee's limits.
@@ -438,12 +451,48 @@ ESCALATION RULES:
 - ALWAYS escalate if historical patterns show a sudden, unexplained spike.
 - Include all evidence in the escalation.
 
+ESCALATION FALLBACK RULE:
+If send_telegram_escalation returns an error, you MUST call send_email_escalation with the same parameters before calling submit_final_decision.
+
 FINAL DECISION: When you are ready, call submit_final_decision with your decision and reasoning. Do not output text – only the tool call. If ESCALATE, you must have already called send_telegram_escalation.
 
 Important: Never reject solely on suspicion. Always base decisions on data. When in doubt, escalate.
 """
 
+AUDITOR_PROMPT = """
+You are an independent compliance auditor. Your only job is to find flaws in the investigation below.
+- List every piece of data that was NOT fetched but could potentially change the decision.
+- Identify any assumptions the investigator made.
+- Point out any contradictory evidence or policy rules that were overlooked.
+- If you find no flaws, explain why the investigation is airtight.
+Output your findings starting with [AUDIT]:
+"""
+
+
 def run_agent(transaction_id: str, employee_id: str, amount: float, category: str, merchant: str = "") -> str:
+
+    # Build transaction context (will be used later for context injection)
+    ctx = {
+        "transaction_id": transaction_id,
+        "employee_id": employee_id,
+        "amount": amount,
+        "category": category,
+        "merchant": merchant
+    }
+
+    # Initialize registry
+    registry = ToolRegistry(ctx)
+
+    # Register all tools
+    registry.register("get_employee_profile", get_employee_profile_json, get_employee_profile)
+    registry.register("get_expense_policy_profile", get_expense_policy_profile_json, get_expense_policy_profile)
+    registry.register("get_employee_transaction_history", get_employee_transaction_history_json, get_employee_transaction_history)
+    registry.register("send_telegram_escalation", send_telegram_escalation_json, send_telegram_escalation)
+    registry.register("search_past_investigations", search_past_investigations_json, search_past_investigations)
+    registry.register("send_email_escalation", send_email_escalation_json, send_email_escalation)
+    registry.register("submit_final_decision", submit_final_decision_json, None)   # will handle manually in the loop
+
+    self_critique_done = False
     amount_str = f"{amount:.2f}" if isinstance(amount, float) else str(amount)
     user_goal = f"Investigate transaction {transaction_id} of amount: {amount_str}$ in category: {category} with merchant - {merchant} of employee with employee_id: {employee_id}"
     print(user_goal)
@@ -451,12 +500,17 @@ def run_agent(transaction_id: str, employee_id: str, amount: float, category: st
 
     max_turns = 10
     call_counter = {}
+    audit_phase_active = False
 
     for turn in range(max_turns):
         print(turn)
-        # <-- forces text output
-        messages[0] ={"role": "system", "content": THINK_SYSTEM_PROMPT}
-        think_response = deepseek_client.chat.completions.create(model="deepseek-v4-pro", messages=messages, tools=tools, tool_choice="none")
+        if not audit_phase_active:
+            messages[0] = {"role": "system", "content": THINK_SYSTEM_PROMPT}
+
+        if audit_phase_active:
+            audit_phase_active = False
+
+        think_response = deepseek_client.chat.completions.create(model=LLM_MODEL, messages=messages, tools=registry.get_all_schemas(), tool_choice="none")
         think_msg = think_response.choices[0].message
         # Append the thought (may already start with [THINK]: or we wrap it)
         messages.append({"role": "assistant", "content": think_msg.content})
@@ -464,7 +518,7 @@ def run_agent(transaction_id: str, employee_id: str, amount: float, category: st
         
         # --- ACT PHASE (tool_choice="auto") ---
         messages[0] = {"role": "system", "content": ACT_SYSTEM_PROMPT}
-        act_response = deepseek_client.chat.completions.create(model="deepseek-v4-pro", messages=messages, tools=tools)
+        act_response = deepseek_client.chat.completions.create(model=LLM_MODEL, messages=messages, tools=registry.get_all_schemas())
     
         act_msg = act_response.choices[0].message
         finish_reason = act_response.choices[0].finish_reason
@@ -480,7 +534,7 @@ def run_agent(transaction_id: str, employee_id: str, amount: float, category: st
                 print(tool_name)
                 tool_args = json.loads(tool_call.function.arguments)
 
-                if tool_name == "submit_final_decision":
+                if tool_name == "submit_final_decision" and self_critique_done:
                     decision = tool_args["decision"]
                     reasoning = tool_args["reasoning"]
                     print("\n----------------------")
@@ -493,15 +547,23 @@ def run_agent(transaction_id: str, employee_id: str, amount: float, category: st
                     save_investigation(transaction_id, employee_id, category, amount, decision, reasoning, evidence_summary)
 
                     return decision
+                
+                elif tool_name == "submit_final_decision" and not self_critique_done:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": "Audit requested. Please review the investigation before finalising."})
+                    # --- Audit PHASE (tool_choice="None") Self Critique---
+                    messages[0] = {"role": "system", "content": AUDITOR_PROMPT}
+                    self_critique_done = True
+                    audit_phase_active = True
+                    continue   # skip execution, go to next loop iteration
 
                 call_signature = (tool_name, json.dumps(tool_args, sort_keys=True))
                 call_counter[call_signature] = call_counter.get(call_signature, 0) + 1
 
-                if call_counter[call_signature] == 2:
+                if call_counter[call_signature] == 3:
                     # Warning: same call repeated twice
                     warning = f"[WARNING] Tool - {tool_name} called a second time with identical args."
                     print(f"[WARNING] Tool - {tool_name} called a second time with identical args.")
-                elif call_counter[call_signature] >= 3:
+                elif call_counter[call_signature] > 3:
                     # Stuck loop detected – escalate immediately
                     reason = f"Agent loop detected: tool '{tool_name}' called {call_counter[call_signature]} times with same arguments."
                     # Build escalation details with what we know
@@ -511,8 +573,10 @@ def run_agent(transaction_id: str, employee_id: str, amount: float, category: st
                     save_investigation(transaction_id, employee_id, category, amount, "escalated", reason, escalation_msg)
                     return reason
 
-                tool = globals().get(tool_name)
-                result = tool(**tool_args) if tool else json.dumps({"error": f"tool - '{tool_name}' not found"})
+                # tool = globals().get(tool_name)
+                # result = tool(**tool_args) if tool else json.dumps({"error": f"tool - '{tool_name}' not found"})
+
+                result = registry.execute(tool_name, tool_args)
             # OBSERVE: Add the tool result to memory as a "tool" role message
                 messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
                 if warning:
@@ -551,16 +615,16 @@ def ensure_transaction_saved(txn_id, emp_id, amount, category, merchant=None, da
     finally:
         session.close()
 
-# T3001 ($120, Office Supplies, E100).
-t_id = "T2217"
-amt = 120.00
-ctgry = "Office Supplies"
-empl_id = "E100"
-merch= "Staples"
+
+t_id = "T2219"
+amt = 350.00
+ctgry = "Software"
+empl_id = "E104"
+merch= "Slack"
 
 # inserting the transaction in the transaction table to ensure that it exists in transactions
 ensure_transaction_saved(t_id, empl_id, amt, ctgry, merch)
 
 final_decision = run_agent(t_id, empl_id, amt, ctgry, merch)
 
-print("\n Final Decision ---> \n\n\n----->\n", final_decision)
+print("\n Final Decision ---> \n\n----->\n", final_decision)
